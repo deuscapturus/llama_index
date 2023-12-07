@@ -1,6 +1,5 @@
 import json
 from typing import Any, Dict, Optional, Sequence
-
 from llama_index.bridge.pydantic import Field, PrivateAttr
 from llama_index.callbacks import CallbackManager
 from llama_index.llms.base import (
@@ -18,15 +17,14 @@ from llama_index.llms.base import (
 )
 from llama_index.llms.bedrock_utils import (
     BEDROCK_FOUNDATION_LLMS,
-    STREAMING_MODELS,
     bedrock_model_to_param_name,
     completion_to_chat_decorator,
     completion_with_retry,
     get_request_body,
     get_text_from_response,
     stream_completion_to_chat_decorator,
+    get_foundation_model_availability,
 )
-
 
 class Bedrock(LLM):
     model: str = Field(description="The modelId of the Bedrock model to use.")
@@ -54,6 +52,8 @@ class Bedrock(LLM):
 
     _client: Any = PrivateAttr()
     _aclient: Any = PrivateAttr()
+    _service_client: Any = PrivateAttr()
+    model_supports_streaming: bool
 
     def __init__(
         self,
@@ -66,6 +66,7 @@ class Bedrock(LLM):
         aws_secret_access_key: Optional[str] = None,
         aws_session_token: Optional[str] = None,
         aws_region_name: Optional[str] = None,
+        client: Any = None,
         timeout: Optional[float] = None,
         max_retries: Optional[int] = 10,
         additional_kwargs: Optional[Dict[str, Any]] = None,
@@ -87,7 +88,9 @@ class Bedrock(LLM):
                 "Please `pip install boto3`"
             ) from e
         try:
-            if not profile_name and aws_access_key_id:
+            if client:
+                self._client = client
+            elif not profile_name and aws_access_key_id:
                 session = boto3.Session(
                     aws_access_key_id=aws_access_key_id,
                     aws_secret_access_key=aws_secret_access_key,
@@ -100,10 +103,9 @@ class Bedrock(LLM):
             # distributed that used the bedrock service to invokeModel.
             # This check prevents any services still using those wheel files
             # from breaking
-            if "bedrock-runtime" in session.get_available_services():
-                self._client = session.client("bedrock-runtime")
-            else:
-                self._client = session.client("bedrock")
+            self._client = session.client("bedrock-runtime")
+            
+            self._service_client = session.client("bedrock")
 
         except botocore.exceptions.NoRegionError as e:
             raise ValueError(
@@ -114,6 +116,24 @@ class Bedrock(LLM):
         additional_kwargs = additional_kwargs or {}
         callback_manager = callback_manager or CallbackManager([])
         context_size = context_size or BEDROCK_FOUNDATION_LLMS[model]
+
+        # validate model exists and set attributes for model
+        try:
+            model_details = self._service_client.get_foundation_model(modelIdentifier=model)
+            self.model_supports_streaming = model_details['modelDetails'].get('responseStreamingSupported', False)
+            self.model_is_foundational = True
+        except self._service_client.exceptions.ValidationException:
+            self.model_is_foundational = False
+        except:
+            raise
+
+        if self.model_is_foundational == True:
+            model_availability = get_foundation_model_availability(session, model)
+            if model_availability["authorizationStatus"] != "AUTHORIZED":
+                raise Exception(f"Not authorized to Bedrock model {model}.  Authorization must be requested.")
+            if model_availability["regionAvailability"] != "AVAILABLE":
+                raise Exception(f"The Bedrock model {model} is not available in the region {session.region_name}")
+
         super().__init__(
             model=model,
             temperature=temperature,

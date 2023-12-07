@@ -1,6 +1,11 @@
 import logging
 from typing import Any, Callable, Sequence
 
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest, AWSResponse
+from botocore.httpsession import URLLib3Session
+import json
+
 from tenacity import (
     before_sleep_log,
     retry,
@@ -48,42 +53,6 @@ CHAT_ONLY_MODELS = {
     "meta.llama2-13b-chat-v1": 2048,
 }
 BEDROCK_FOUNDATION_LLMS = {**COMPLETION_MODELS, **CHAT_ONLY_MODELS}
-
-# Only the following models support streaming as
-# per result of Bedrock.Client.list_foundation_models
-# https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock/client/list_foundation_models.html
-STREAMING_MODELS = {
-    "amazon.titan-tg1-large",
-    "amazon.titan-text-lite-v1:0:4k",
-    "amazon.titan-text-lite-v1",
-    "amazon.titan-text-express-v1:0:8k",
-    "amazon.titan-text-express-v1",
-    "amazon.titan-embed-text-v1:2:8k",
-    "amazon.titan-embed-text-v1",
-    "anthropic.claude-instant-v1:2:100k",
-    "anthropic.claude-instant-v1",
-    "anthropic.claude-v1:3:18k",
-    "anthropic.claude-v1:3:100k",
-    "anthropic.claude-v1",
-    "anthropic.claude-v2:0:18k",
-    "anthropic.claude-v2:0:100k",
-    "anthropic.claude-v2:1:18k",
-    "anthropic.claude-v2:1:200k",
-    "anthropic.claude-v2:1",
-    "anthropic.claude-v2",
-    "cohere.command-text-v14:7:4k",
-    "cohere.command-text-v14",
-    "cohere.command-light-text-v14:7:4k",
-    "cohere.command-light-text-v14",
-    "meta.llama2-13b-chat-v1:0:4k",
-    "meta.llama2-13b-chat-v1",
-    "meta.llama2-70b-chat-v1:0:4k",
-    "meta.llama2-70b-chat-v1",
-    "meta.llama2-13b-v1:0:4k",
-    "meta.llama2-13b-v1",
-    "meta.llama2-70b-v1:0:4k",
-    "meta.llama2-70b-v1",
-}
 
 # Each bedrock model specifies parameters with a slightly different name
 # most of these are passed optionally by the user in kwargs but max tokens
@@ -238,3 +207,27 @@ def stream_completion_to_chat_decorator(
         return stream_completion_response_to_chat_response(completion_response)
 
     return wrapper
+
+def get_foundation_model_availability(boto_session: Any, model: str) -> dict:
+    """
+        Example Output:
+        {
+        	"agreementAvailability": {
+        		"errorMessage": null,
+        		"status": "AVAILABLE"
+        	},
+        	"authorizationStatus": "AUTHORIZED",
+        	"entitlementAvailability": "AVAILABLE",
+        	"modelId": "cohere.command-text-v14",
+        	"regionAvailability": "AVAILABLE"
+        }
+    """
+    region = boto_session.region_name
+    request = AWSRequest(method='GET', url=f'https://bedrock.{region}.amazonaws.com/foundation-model-availability/{model}')
+    credentials = boto_session.get_credentials().get_frozen_credentials()
+    SigV4Auth(credentials, 'bedrock', region).add_auth(request)
+    
+    url_session = URLLib3Session()
+    result: AWSResponse = url_session.send(request.prepare())
+    
+    return json.loads(result.text)
